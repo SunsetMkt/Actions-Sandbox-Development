@@ -1,0 +1,129 @@
+name: Windows RDP Sandbox with Tailscale
+# RDP: runneradmin:6MonkeysRLooking^
+# SSH: runneradmin:6MonkeysRLooking^
+# Why 6MonkeysRLooking^: https://support.microsoft.com/en-us/windows/create-and-use-strong-passwords-c5cebb49-8c53-4f5e-2bc4-fe357ca048eb
+
+# Controls when the workflow will run
+on:
+    # Allows you to run this workflow manually from the Actions tab
+    workflow_dispatch:
+    # Allows external webhook trigger
+    repository_dispatch:
+        types: [windows-rdp-tailscale]
+
+# You can use the following syntax to disable permissions for all of the available permissions:
+permissions: {}
+
+# concurrency:
+#     # Only one workflow can run at a time
+#     group: ${{ github.workflow }}
+#     cancel-in-progress: true # Cancel previous runs
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+    # This workflow contains a single job called "sandbox"
+    sandbox:
+        # The type of runner that the job will run on
+        runs-on: windows-2025
+        # This is a hard limit. 360 is the maximum allowed by GitHub.
+        timeout-minutes: 360
+
+        # Steps represent a sequence of tasks that will be executed as part of the job
+        steps:
+            # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+            # - uses: actions/checkout@v4
+
+            # Windows Server runner seems have SSH already enabled
+            - name: Setup
+              run: |
+                  # Enable RDP
+                  Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server'-name "fDenyTSConnections" -Value 0
+                  Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+                  Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 1
+                  # Set password
+                  Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText "6MonkeysRLooking^" -Force)
+                  # Enable Audio
+                  Set-Service -Name "Audiosrv" -StartupType Automatic
+                  Start-Service -Name "Audiosrv"
+                  # Hide power button and log off button
+                  function Set-DwordRegistryValue {
+                      param (
+                          [Parameter(Mandatory=$true)]
+                          [string]$Path,
+                          [Parameter(Mandatory=$true)]
+                          [string]$Name,
+                          [Parameter(Mandatory=$true)]
+                          [int]$Value
+                      )
+
+                      if (-not (Test-Path $Path)) {
+                          New-Item -Path $Path -Force | Out-Null
+                      }
+
+                      New-ItemProperty -Path $Path -Name $Name -Value $Value -PropertyType DWord -Force | Out-Null
+                  }
+                      
+                  Set-DwordRegistryValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer" -Name "StartMenuLogOff" -Value 1
+                  Set-DwordRegistryValue -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer" -Name "NoClose" -Value 1
+                  Set-DwordRegistryValue -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer" -Name "HidePowerOptions" -Value 1
+                  # Hide hosted-compute-agent window
+                  function Hide-Window {
+                      param([string]$ProcessName = "notepad")
+
+                      Add-Type @"
+                  using System;
+                  using System.Runtime.InteropServices;
+                  public class Win32 {
+                      [DllImport("user32.dll")]
+                      public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+                      [DllImport("user32.dll")]
+                      public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+                      [DllImport("user32.dll")]
+                      public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+                  }
+                  "@
+
+                      $SW_HIDE = 0
+                      $GWL_EXSTYLE = -20
+                      $WS_EX_TOOLWINDOW = 0x00000080
+
+                      $procs = Get-Process -Name $ProcessName -ErrorAction SilentlyContinue
+                      if (-not $procs) { return }
+
+                      foreach ($proc in $procs) {
+                          $hwnd = $proc.MainWindowHandle
+                          if ($hwnd -eq 0) { continue }
+                          $exStyle = [Win32]::GetWindowLong($hwnd, $GWL_EXSTYLE)
+                          [Win32]::SetWindowLong($hwnd, $GWL_EXSTYLE, $exStyle -bor $WS_EX_TOOLWINDOW) | Out-Null
+                          [Win32]::ShowWindow($hwnd, $SW_HIDE) | Out-Null
+                      }
+                  }
+
+                  Hide-Window -ProcessName hosted-compute-agent
+
+            - name: Tailscale
+              uses: tailscale/github-action@v3
+              with:
+                  oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+                  oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+                  tags: tag:ci
+                  args: --advertise-exit-node
+                  hostname: gha-windows-sandbox
+                  version: latest
+
+            # Should be runneradmin
+            - name: whoami
+              run: whoami
+
+            # Each job in a workflow can run for up to 6 hours of execution time.
+            # If a job reaches this limit, the job is terminated and fails.
+            # You may NOT log out runneradmin, since this will kill the Actions agent executable.
+            # ("C:\ProgramData\GitHub\HostedComputeAgent\hosted-compute-agent")
+            # The VM will be destroyed without agent watchdog message. So do not kill the agent process.
+            - name: Sleep
+              run: |
+                  '@echo off\n type nul > C:\Users\runneradmin\Desktop\stop_sleeping_step_confirmed.txt' | Out-File C:\Users\runneradmin\Desktop\shutdown_confirmed.bat -Encoding ASCII
+                  Write-Host "Sleeping..."
+                  while (-not (Test-Path "C:\Users\runneradmin\Desktop\stop_sleeping_step_confirmed.txt")) {
+                      Start-Sleep -Seconds 5
+                  }

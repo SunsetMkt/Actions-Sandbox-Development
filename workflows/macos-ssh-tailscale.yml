@@ -1,0 +1,93 @@
+name: macOS SSH Sandbox with Tailscale
+# SSH: altrunner:6MonkeysRLooking^
+# VNC: altrunner:6MonkeysRLooking^ (Port: 5900) (Black Screen)
+
+# Controls when the workflow will run
+on:
+    # Allows you to run this workflow manually from the Actions tab
+    workflow_dispatch:
+    # Allows external webhook trigger
+    repository_dispatch:
+        types: [macos-ssh-tailscale]
+
+# You can use the following syntax to disable permissions for all of the available permissions:
+permissions: {}
+
+# concurrency:
+#     # Only one workflow can run at a time
+#     group: ${{ github.workflow }}
+#     cancel-in-progress: true # Cancel previous runs
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+    # This workflow contains a single job called "sandbox"
+    sandbox:
+        # The type of runner that the job will run on
+        runs-on: macos-26
+        # This is a hard limit. 360 is the maximum allowed by GitHub.
+        timeout-minutes: 360
+
+        # Steps represent a sequence of tasks that will be executed as part of the job
+        steps:
+            # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+            # - uses: actions/checkout@v4
+
+            # macOS runner seems have SSH already enabled
+            - name: Setup
+              run: |
+                  # https://github.com/dikeckaan/MacOS-Workflow-VNC/blob/master/configure.sh
+                  # Disable spotlight indexing
+                  sudo mdutil -i off -a
+
+                  # Create new account
+                  sudo dscl . -create /Users/altrunner
+                  sudo dscl . -create /Users/altrunner UserShell /bin/bash
+                  sudo dscl . -create /Users/altrunner RealName "My User"
+                  sudo dscl . -create /Users/altrunner UniqueID 1001
+                  sudo dscl . -create /Users/altrunner PrimaryGroupID 80
+                  sudo dscl . -create /Users/altrunner NFSHomeDirectory /Users/altrunner
+                  sudo dscl . -passwd /Users/altrunner "6MonkeysRLooking^"
+                  sudo dscl . -passwd /Users/altrunner "6MonkeysRLooking^"
+                  sudo createhomedir -c -u altrunner
+
+                  # Enable VNC
+                  # Set priveleges
+                  sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -configure -allowAccessFor -allUsers -privs -all
+                  # Allow VNC clients
+                  sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -configure -clientopts -setvnclegacy -vnclegacy yes 
+
+                  # VNC password - http://hints.macworld.com/article.php?story=20071103011608872
+                  echo "6MonkeysRLooking^" | perl -we 'BEGIN { @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA"}; $_ = <>; chomp; s/^(.{8}).*/$1/; @p = unpack "C*", $_; foreach (@k) { printf "%02X", $_ ^ (shift @p || 0) }; print "\n"' | sudo tee /Library/Preferences/com.apple.VNCSettings.txt
+
+                  # Start VNC/reset changes
+                  sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -restart -agent -console
+                  sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate
+                  # This actually won't work. VNC client only shows black screen
+                  # Screen recording might be disabled. Screen Sharing or Remote Management must be enabled from System Preferences or via MDM.
+                  # Screen control might be disabled. Screen Sharing or Remote Management must be enabled from System Preferences or via MDM.
+
+            - name: Tailscale
+              uses: tailscale/github-action@v3
+              with:
+                  oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+                  oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+                  tags: tag:ci
+                  # Tailscale SSH feature does not need openssh-server or user password, it's controlled by ACL
+                  args: --advertise-exit-node --ssh
+                  hostname: gha-macos-sandbox
+                  version: latest
+
+            # Should be runner
+            - name: whoami
+              run: whoami
+
+            # Each job in a workflow can run for up to 6 hours of execution time.
+            # If a job reaches this limit, the job is terminated and fails.
+            - name: Sleep
+              run: |
+                  echo -e "#!/bin/bash\n\ntouch /tmp/stop_sleeping_step_confirmed" | sudo tee /Users/altrunner/shutdown_confirmed.sh
+                  sudo chmod +x /Users/altrunner/shutdown_confirmed.sh
+                  echo "Sleeping..."
+                  while [ ! -e /tmp/stop_sleeping_step_confirmed ]; do
+                      sleep 5
+                  done
